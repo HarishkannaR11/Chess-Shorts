@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+httpx
+google-generativeai
+python-dotenv
+pydantic
+groq
+kokoro-onnx
+python-chess
+pymupdf
+Pillow
+soundfile
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+aiosqlite
+apscheduler

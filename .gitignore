@@ -1,0 +1,19 @@
+venv/
+__pycache__/
+*.pyc
+.env
+credentials.json
+token.json
+
+# Outputs & DB
+outputs/
+chess_shorts.db
+
+# Heavy models
+*.onnx
+*.bin
+
+# Assets to ignore (unless you want them versioned)
+assets/music/
+assets/sounds/*.mp3
+assets/sounds/*.wav
