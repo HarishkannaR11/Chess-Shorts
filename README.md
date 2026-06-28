@@ -10,6 +10,29 @@ The system supports three distinct formats:
 - **📖 Champion Stories:** 30-second narrated sequences showcasing brilliant checkmates from Lichess grandmaster games.
 - **📚 Puzzle Series:** A progressive series of puzzles designed for high-retention playlists.
 
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    A[Cron Scheduler / UI Dashboard] -->|Triggers Generation| B(main.py - FastAPI)
+    
+    subgraph Pipeline
+        B --> C[puzzle.py]
+        C -->|Fetches Data| D[(Local SQLite DB / Lichess API)]
+        B --> E[script.py]
+        E -->|Generates Hook & Text| F[LLM / Groq API]
+        B --> G[voice.py]
+        G -->|Synthesizes Audio| H[TTS Engine / Kokoro]
+        B --> I[board.py]
+        I -->|Renders PNG Frames| J[Pillow]
+        B --> K[video.py]
+        K -->|Composites Audio/Video| L[FFmpeg]
+    end
+    
+    L --> M[upload.py]
+    M -->|OAuth2 Publish| N[YouTube API v3]
+```
+
 ## 🧠 System Design Concepts
 
 This project was built with scalability and reliability in mind, utilizing the following system design principles:
