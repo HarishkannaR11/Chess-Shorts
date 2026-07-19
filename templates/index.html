@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knightify Chess Panel</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #121212; color: #eee; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #fff; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        button { background: #6200ea; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; }
+        button:hover { background: #7c4dff; }
+        button:disabled { background: #444; cursor: not-allowed; }
+        
+        .panel { background: #1e1e1e; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .logs-box { background: #000; font-family: monospace; padding: 10px; height: 200px; overflow-y: auto; font-size: 13px; color: #0f0; margin-top: 10px; }
+        .status-badge { display: inline-block; padding: 5px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; background: #333; }
+        
+        .qa-card { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+        .qa-item { padding: 10px; border-radius: 4px; border: 1px solid #333; flex: 1; min-width: 200px; }
+        .qa-pass { border-left: 4px solid #4CAF50; background: rgba(76, 175, 80, 0.1); }
+        .qa-fail { border-left: 4px solid #F44336; background: rgba(244, 67, 54, 0.1); }
+        
+        .video-container { text-align: center; margin-top: 20px; }
+        video { max-width: 100%; height: 400px; border-radius: 8px; border: 1px solid #333; }
+        
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; color: #ccc; }
+        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 8px; background: #222; border: 1px solid #444; color: white; border-radius: 4px; box-sizing: border-box; }
+        
+        .hidden { display: none; }
+        #uploadResult { margin-top: 10px; padding: 10px; border-radius: 4px; }
+        .success-text { color: #4CAF50; }
+        .error-text { color: #F44336; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Knightify Chess Control Panel</h1>
+    
+    <div class="panel">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <button id="generateBtn" onclick="startGeneration()">Generate Video</button>
+            <div>Status: <span id="statusBadge" class="status-badge">Idle</span></div>
+        </div>
+        
+        <div class="logs-box" id="logsBox"></div>
+        
+        <div id="qaContainer" class="hidden">
+            <h3>QA Checks</h3>
+            <div class="qa-card" id="qaResults"></div>
+        </div>
+    </div>
+    
+    <div class="panel hidden" id="previewPanel">
+        <h2>Preview</h2>
+        <div class="video-container">
+            <video id="videoPlayer" controls>
+                <source id="videoSource" src="" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+    </div>
+    
+    <div class="panel hidden" id="uploadPanel">
+        <h2>YouTube Upload</h2>
+        <div class="form-group">
+            <label>Title</label>
+            <input type="text" id="ytTitle" value="Epic Chess Puzzle #chess #shorts">
+        </div>
+        <div class="form-group">
+            <label>Description</label>
+            <textarea id="ytDesc" rows="3">Can you find the brilliant move? Follow Knightify Chess for more! #chess #tactics #shorts</textarea>
+        </div>
+        <div class="form-group">
+            <label>Tags (comma separated)</label>
+            <input type="text" id="ytTags" value="chess,shorts,tactics,chess puzzle,grandmaster">
+        </div>
+        <div class="form-group">
+            <label>Privacy</label>
+            <select id="ytPrivacy">
+                <option value="private">Private</option>
+                <option value="unlisted" selected>Unlisted</option>
+                <option value="public">Public</option>
+            </select>
+        </div>
+        <button id="uploadBtn" onclick="uploadVideo()">Upload to YouTube</button>
+        <div id="uploadResult"></div>
+    </div>
+</div>
+
+<script>
+    let pollInterval = null;
+
+    function startGeneration() {
+        document.getElementById('generateBtn').disabled = true;
+        document.getElementById('previewPanel').classList.add('hidden');
+        document.getElementById('uploadPanel').classList.add('hidden');
+        document.getElementById('qaContainer').classList.add('hidden');
+        document.getElementById('logsBox').innerHTML = "";
+        
+        fetch('/generate', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if(data.success) {
+                    if(pollInterval) clearInterval(pollInterval);
+                    pollInterval = setInterval(pollStatus, 2000);
+                } else {
+                    alert("Error starting generation: " + data.error);
+                    document.getElementById('generateBtn').disabled = false;
+                }
+            })
+            .catch(e => {
+                alert("Network error: " + e);
+                document.getElementById('generateBtn').disabled = false;
+            });
+    }
+
+    function updateQA(qa) {
+        if(!qa) return;
+        const cont = document.getElementById('qaContainer');
+        const res = document.getElementById('qaResults');
+        cont.classList.remove('hidden');
+        
+        let html = '';
+        const checks = [
+            { name: "Duration", data: qa.duration },
+            { name: "Silence", data: qa.silence },
+            { name: "Frozen Frames", data: qa.frozen }
+        ];
+        
+        checks.forEach(c => {
+            const cls = c.data.pass ? 'qa-pass' : 'qa-fail';
+            const icon = c.data.pass ? '✅' : '❌';
+            html += `<div class="qa-item ${cls}">
+                <strong>${icon} ${c.name}</strong><br/>
+                <small>${c.data.msg}</small>
+            </div>`;
+        });
+        res.innerHTML = html;
+    }
+
+    function pollStatus() {
+        fetch('/status')
+            .then(r => r.json())
+            .then(data => {
+                // Update Logs
+                const logsBox = document.getElementById('logsBox');
+                logsBox.innerHTML = data.logs.join("<br/>");
+                logsBox.scrollTop = logsBox.scrollHeight;
+                
+                // Update Badge
+                const badge = document.getElementById('statusBadge');
+                badge.innerText = data.status.toUpperCase();
+                
+                if (data.status === 'running' || data.status === 'checking') {
+                    badge.style.background = '#2196F3';
+                } else if (data.status === 'done') {
+                    badge.style.background = '#4CAF50';
+                    clearInterval(pollInterval);
+                    document.getElementById('generateBtn').disabled = false;
+                    updateQA(data.qa_results);
+                    showVideo();
+                } else if (data.status === 'needs_review') {
+                    badge.style.background = '#FF9800';
+                    clearInterval(pollInterval);
+                    document.getElementById('generateBtn').disabled = false;
+                    updateQA(data.qa_results);
+                    showVideo(); // Allow them to review the failed video
+                } else if (data.status === 'failed') {
+                    badge.style.background = '#F44336';
+                    clearInterval(pollInterval);
+                    document.getElementById('generateBtn').disabled = false;
+                }
+            })
+            .catch(console.error);
+    }
+
+    function showVideo() {
+        document.getElementById('previewPanel').classList.remove('hidden');
+        document.getElementById('uploadPanel').classList.remove('hidden');
+        
+        const player = document.getElementById('videoPlayer');
+        // Add timestamp to bypass cache
+        player.src = `/videos/latest.mp4?t=${new Date().getTime()}`;
+        player.load();
+    }
+
+    function uploadVideo() {
+        const btn = document.getElementById('uploadBtn');
+        const res = document.getElementById('uploadResult');
+        btn.disabled = true;
+        btn.innerText = "Uploading...";
+        res.innerHTML = "";
+        
+        const formData = new FormData();
+        formData.append('title', document.getElementById('ytTitle').value);
+        formData.append('description', document.getElementById('ytDesc').value);
+        formData.append('tags', document.getElementById('ytTags').value);
+        formData.append('privacy', document.getElementById('ytPrivacy').value);
+        
+        fetch('/upload', {
+            method: 'POST',
+            body: formData
+        })
+        .then(r => r.json())
+        .then(data => {
+            if(data.success) {
+                res.innerHTML = `<span class="success-text">Success! Video is live at: <a href="${data.url}" target="_blank" style="color:#2196F3">${data.url}</a></span>`;
+            } else {
+                res.innerHTML = `<span class="error-text">Upload Failed: ${data.error}</span>`;
+            }
+        })
+        .catch(e => {
+            res.innerHTML = `<span class="error-text">Network Error: ${e}</span>`;
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerText = "Upload to YouTube";
+        });
+    }
+
+    // Initial check in case server reloaded while running
+    pollStatus();
+</script>
+
+</body>
+</html>

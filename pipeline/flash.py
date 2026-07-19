@@ -9,6 +9,7 @@ import textwrap
 import asyncio
 from database.db import is_fen_used, is_hook_used_recently, mark_content_used, get_local_puzzle
 from pipeline.board import generate_flash_frames
+from pipeline.ssl_context import get_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ async def fetch_unique_flash_puzzle():
         logger.info(f"Using local puzzle {local_p['puzzle']['id']} (rating {local_p['puzzle']['rating']})")
         return local_p
         
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=get_ssl_context()) as client:
         for attempt in range(40):
             try:
                 resp = await client.get("https://lichess.org/api/puzzle/next")
@@ -104,43 +105,36 @@ async def generate_flash(output_base_dir="outputs"):
     # Actually wait, `initialPly` tells us how many moves to skip to reach puzzle start.
     # And `puzzle["solution"]` is the actual solution moves.
     # Let's just use the logic from puzzle.py to get the fen and solution moves.
-    moves = puzzle_data["game"]["pgn"].split()
+    pgn_str = puzzle_data["game"]["pgn"]
     import chess
-    b = chess.Board()
-    for m in moves:
-        b.push_san(m)
+    if "/" in pgn_str:
+        b = chess.Board(pgn_str)
+    else:
+        moves = pgn_str.split()
+        b = chess.Board()
+        for m in moves:
+            b.push_san(m)
     fen = b.fen()
     sol_moves = puzzle_data["puzzle"]["solution"]
     
     frames_dir = os.path.join(output_dir, "frames")
-    frames_result = generate_flash_frames(fen, sol_moves)
+    frames_result = generate_flash_frames(
+        fen, sol_moves, 
+        rating=rating, 
+        themes=puzzle_data.get("puzzle", {}).get("themes", []),
+        cta_text="Can you solve it? Follow Knightify Chess for more!",
+        output_dir=output_dir
+    )
     frame_paths = frames_result["frames"]
     move_timestamps = frames_result["move_timestamps"]
     
     # 4. Generate video
     video_path = os.path.join(output_dir, "final.mp4")
     
-    if os.name == 'nt':
-        font_path = os.environ.get('WINDIR', 'C:\\Windows') + '\\Fonts\\arialbd.ttf'
-        font_path_ffmpeg = font_path.replace('\\', '/').replace(':', '\\:')
-    else:
-        font_path_ffmpeg = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf".replace('\\', '/').replace(':', '\\:')
-        
-    escaped_hook = hook_text.replace("'", "\\'").replace(":", "\\:")
-    wrapped_hook = "\\n".join(textwrap.wrap(escaped_hook, width=30)[:2])
-    
     from pipeline.assets_setup import get_random_track
     bg_music = get_random_track("flash")
         
-    drawtext_filter = (
-        f"scale=1080:1080,pad=1080:1920:0:250:#0f0f0f,"
-        f"drawtext=text='{wrapped_hook}':fontsize=72:fontcolor=white:x=(w-text_w)/2:y=100:fontfile='{font_path_ffmpeg}':borderw=4:bordercolor=black,"
-        f"drawtext=text='⭐ Rating\\: {rating}':fontsize=50:fontcolor=white:x=(w-text_w)/2:y=1350:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='#tactics #puzzle #chess':fontsize=40:fontcolor=#AAAAAA:x=(w-text_w)/2:y=1450:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='Follow for daily puzzles 🔥':fontsize=50:fontcolor=#FFD700:x=(w-text_w)/2:y=1750:fontfile='{font_path_ffmpeg}':borderw=2:bordercolor=black"
-    )
-    
-    frames_pattern = os.path.join("outputs", "frames", "frame_%04d.png")
+    frames_pattern = os.path.join(frames_dir, "frame_%04d.png")
         
     silent_video = os.path.join(output_dir, "silent.mp4")
     
@@ -148,11 +142,10 @@ async def generate_flash(output_base_dir="outputs"):
         "ffmpeg", "-y",
         "-framerate", "30",
         "-i", frames_pattern,
-        "-vf", drawtext_filter,
         "-c:v", "libx264",
+        "-preset", "slow",
+        "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-b:v", "3000k",
-        "-t", "10",
         silent_video
     ]
     run_cmd(cmd1)
@@ -214,12 +207,12 @@ async def generate_flash(output_base_dir="outputs"):
             
             if has_sfx:
                 cmd2.extend([
-                    "-filter_complex", f"[0:a]volume=1.0[sfx];[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1.0,atrim=duration={duration}[music];[sfx][music]amix=inputs=2:duration=longest[aout]",
+                    "-filter_complex", f"[0:a]volume=1.0[sfx];[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1.0,atrim=duration={duration}[music];[sfx][music]amix=inputs=2:duration=longest,loudnorm=I=-14:LRA=11:TP=-1.5[aout]",
                     "-map", "0:v", "-map", "[aout]"
                 ])
             else:
                 cmd2.extend([
-                    "-filter_complex", f"[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1.0,atrim=duration={duration}[aout]",
+                    "-filter_complex", f"[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1.0,atrim=duration={duration},loudnorm=I=-14:LRA=11:TP=-1.5[aout]",
                     "-map", "0:v", "-map", "[aout]"
                 ])
                 
@@ -239,7 +232,7 @@ async def generate_flash(output_base_dir="outputs"):
     
     # 5. Thumbnail
     thumb_path = os.path.join(output_dir, "thumbnail.png")
-    first_frame = os.path.join("outputs", "frames", "frame_0000.png")
+    first_frame = os.path.join(frames_dir, "frame_0000.png")
     if os.path.exists(first_frame):
         import shutil
         shutil.copy(first_frame, thumb_path)

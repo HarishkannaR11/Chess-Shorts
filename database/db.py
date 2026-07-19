@@ -36,6 +36,10 @@ async def init_db():
             await db.execute("ALTER TABLE videos ADD COLUMN format TEXT DEFAULT 'story'")
         if 'hook' not in columns:
             await db.execute("ALTER TABLE videos ADD COLUMN hook TEXT")
+        if 'views' not in columns:
+            await db.execute("ALTER TABLE videos ADD COLUMN views INTEGER DEFAULT 0")
+        if 'viewed_percentage' not in columns:
+            await db.execute("ALTER TABLE videos ADD COLUMN viewed_percentage REAL DEFAULT 0.0")
             
         await db.execute('''
             CREATE TABLE IF NOT EXISTS used_content (
@@ -258,13 +262,72 @@ async def get_local_puzzle(min_rating: int, max_rating: int) -> dict | None:
             FROM local_puzzles 
             WHERE rating >= ? AND rating <= ?
             AND fen NOT IN (SELECT fen FROM used_content)
-            ORDER BY RANDOM() LIMIT 1
+            ORDER BY RANDOM() LIMIT 100
         ''', (min_rating, max_rating))
         
-        row = await cursor.fetchone()
-        if not row:
+        rows = await cursor.fetchall()
+        if not rows:
             return None
             
+        # Get recent fens (last 14 days) from used_content
+        recent_cursor = await db.execute('''
+            SELECT fen FROM used_content WHERE created_at >= datetime('now', '-14 days')
+        ''')
+        recent_rows = await recent_cursor.fetchall()
+        recent_fens = [r[0] for r in recent_rows if r[0]]
+        
+        # Also try to load recent fens from uniqueness.db
+        import sqlite3
+        try:
+            uniq_db = os.path.join("database", "uniqueness.db")
+            if os.path.exists(uniq_db):
+                with sqlite3.connect(uniq_db) as conn:
+                    c = conn.cursor()
+                    c.execute("SELECT fen FROM used_history WHERE timestamp >= datetime('now', '-14 days')")
+                    recent_fens.extend([r[0] for r in c.fetchall() if r[0]])
+        except Exception:
+            pass
+            
+        import chess
+        recent_set = set(recent_fens)
+        
+        for row in rows:
+            cand_fen = row["fen"]
+            cand_board = chess.Board(cand_fen)
+            cand_placement = cand_fen.split()[0]
+            
+            is_dup = False
+            for ref_fen in recent_set:
+                if ref_fen.split()[0] == cand_placement:
+                    is_dup = True
+                    break
+                try:
+                    ref_board = chess.Board(ref_fen)
+                    diff_squares = 0
+                    for sq in chess.SQUARES:
+                        if cand_board.piece_at(sq) != ref_board.piece_at(sq):
+                            diff_squares += 1
+                            if diff_squares > 8:
+                                break
+                    if diff_squares <= 8:
+                        is_dup = True
+                        break
+                except Exception:
+                    continue
+            
+            if not is_dup:
+                return {
+                    "game": {"pgn": cand_fen},
+                    "puzzle": {
+                        "id": row["id"],
+                        "rating": row["rating"],
+                        "solution": row["moves"].split(),
+                        "themes": row["themes"].split() if row["themes"] else ["Tactics"]
+                    }
+                }
+                
+        # Fallback to first row if all are near-duplicates
+        row = rows[0]
         return {
             "game": {"pgn": row["fen"]},
             "puzzle": {

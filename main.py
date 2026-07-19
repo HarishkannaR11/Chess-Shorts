@@ -1,6 +1,17 @@
 import os
 import json
 import logging
+from dotenv import load_dotenv
+load_dotenv()
+
+# Prepend custom FFmpeg paths to system PATH for child processes
+for path_env in ["FFMPEG_PATH", "FFPROBE_PATH"]:
+    custom_path = os.environ.get(path_env)
+    if custom_path:
+        custom_dir = os.path.dirname(custom_path)
+        if custom_dir and os.path.isdir(custom_dir) and custom_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = custom_dir + os.pathsep + os.environ.get("PATH", "")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,7 +51,7 @@ async def lifespan(app: FastAPI):
     # Preload local puzzles if missing
     import sqlite3
     try:
-        conn = sqlite3.connect('chess_shorts.db')
+        conn = sqlite3.connect('database/chess_shorts.db')
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM local_puzzles")
         if c.fetchone()[0] == 0:
@@ -64,8 +75,8 @@ async def lifespan(app: FastAPI):
             if sched.get("enabled"):
                 time_str = sched.get("time", "09:00")
                 hour, minute = map(int, time_str.split(':'))
-                scheduler.add_job(run_master_pipeline, 'cron', hour=hour, minute=minute, id="daily_video", replace_existing=True)
-                logger.info(f"Scheduled daily video generation for {time_str}")
+                scheduler.add_job(run_scheduled_cycle, 'cron', hour=hour, minute=minute, id="daily_video", replace_existing=True)
+                logger.info(f"Scheduled 1x/day video generation cycle for {time_str}")
         except Exception as e:
             logger.error(f"Error loading schedule: {e}")
             
@@ -103,6 +114,7 @@ class ThumbnailRequest(BaseModel):
 
 class UploadRequest(BaseModel):
     video_id: int
+    privacy_status: str = "public"
 
 class ScheduleRequest(BaseModel):
     time: str
@@ -131,6 +143,18 @@ async def create_script(puzzle: PuzzleModel):
 
 from pipeline.flash import generate_flash
 from pipeline.story import generate_story
+from pipeline.analytics import sync_all_uploaded_analytics
+
+@app.post("/analytics/sync")
+async def sync_analytics():
+    """Trigger a sync of video views and retention percentages from YouTube."""
+    try:
+        res = await sync_all_uploaded_analytics()
+        return res
+    except Exception as e:
+        logger.error(f"Failed to sync analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/generate/flash")
 async def api_generate_flash():
@@ -406,6 +430,109 @@ async def run_master_pipeline():
         logger.error(f"Error in master pipeline: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def is_youtube_quota_exhausted() -> bool:
+    """Check if the YouTube Data API quota is exhausted using a cheap 1-unit call."""
+    try:
+        from pipeline.upload import get_authenticated_service
+        youtube = get_authenticated_service()
+        youtube.channels().list(part="id", mine=True).execute()
+        return False
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "quotaexceeded" in err_msg or "quota exceeded" in err_msg:
+            logger.warning(f"YouTube quota is exhausted: {e}")
+            return True
+        logger.error(f"Error checking YouTube quota: {e}")
+        return False
+
+async def get_next_format() -> str:
+    """Query the last used format from the database to rotate formats (flash -> story -> series)."""
+    try:
+        import aiosqlite
+        from database.db import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT format FROM used_content ORDER BY created_at DESC LIMIT 1")
+            row = await cursor.fetchone()
+            if not row:
+                return "flash"
+            last_format = row[0]
+            if last_format == "flash":
+                return "story"
+            elif last_format == "story":
+                return "series"
+            else:
+                return "flash"
+    except Exception as e:
+        logger.warning(f"Error getting next format from database: {e}. Defaulting to flash.")
+        return "flash"
+
+async def run_scheduled_cycle():
+    """Scheduled job that runs daily: checks quota, rotates formats, generates, and saves as pending."""
+    logger.info("Starting scheduled video generation cycle...")
+    if is_youtube_quota_exhausted():
+        logger.warning("YouTube quota is exhausted for today. Skipping scheduled run gracefully.")
+        return
+        
+    fmt = await get_next_format()
+    logger.info(f"Scheduled Run - Selected format: {fmt}")
+    
+    try:
+        if fmt == "flash":
+            from pipeline.flash import generate_flash
+            logger.info("Executing Flash video generator...")
+            result = await generate_flash()
+            db_id = await save_video({
+                "title": result["title"],
+                "description": "Can you find the winning move? #chess #tactics #puzzle #shorts",
+                "thumbnail_path": result["thumbnail_path"],
+                "video_path": result["video_path"],
+                "script_json": json.dumps({"hook": result["hook"], "tags": "chess, tactics, shorts"}),
+                "format": "flash",
+                "hook": result["hook"]
+            })
+            
+        elif fmt == "story":
+            from pipeline.story import generate_story
+            logger.info("Executing Story video generator...")
+            result = await generate_story()
+            db_id = await save_video({
+                "title": result["title"],
+                "description": result["script"].get("description", "") + "\n\n#shorts #chess #story",
+                "thumbnail_path": result["thumbnail_path"],
+                "video_path": result["video_path"],
+                "script_json": json.dumps(result["script"]),
+                "format": "story",
+                "hook": result["script"].get("hook", "")
+            })
+            
+        else: # series
+            from pipeline.series import generate_series
+            logger.info("Executing Series video generator...")
+            result = await generate_series("outputs")
+            series_db_id = await save_series_puzzle({
+                'puzzle_number': result['puzzle_number'],
+                'fen': "",
+                'moves': "",
+                'rating': result['rating'],
+                'theme': result['script']['theme'],
+                'video_path': result['video_path'],
+                'thumbnail_path': result['thumbnail_path']
+            })
+            db_id = await save_video({
+                "title": result["title"],
+                "description": f"Can you solve puzzle #{result['puzzle_number']}? #shorts #chess #series",
+                "thumbnail_path": result["thumbnail_path"],
+                "video_path": result["video_path"],
+                "script_json": json.dumps(result["script"]),
+                "format": "series",
+                "hook": result["title"]
+            })
+            
+        logger.info(f"Video generated successfully and saved to DB with ID: {db_id} as pending.")
+            
+    except Exception as e:
+        logger.error(f"Scheduled video generation cycle failed: {e}", exc_info=True)
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
     """Serve the dashboard UI."""
@@ -474,11 +601,15 @@ async def trigger_upload(req: UploadRequest):
         try:
             # Handle standard json
             script = json.loads(video["script_json"])
+            if not isinstance(script, dict):
+                script = {}
         except Exception:
             # Fallback if it was saved as a stringified python dictionary or is missing
             import ast
             try:
                 script = ast.literal_eval(video["script_json"]) if video.get("script_json") else {}
+                if not isinstance(script, dict):
+                    script = {}
             except Exception:
                 script = {}
                 
@@ -494,7 +625,8 @@ async def trigger_upload(req: UploadRequest):
             thumbnail_path=video["thumbnail_path"],
             title=title,
             description=description,
-            tags=tags
+            tags=tags,
+            privacy=req.privacy_status
         )
         
         await update_video_status(req.video_id, "uploaded", yt_url, yt_id)
@@ -542,7 +674,8 @@ async def update_schedule(req: ScheduleRequest):
             
         if req.enabled:
             hour, minute = map(int, req.time.split(':'))
-            scheduler.add_job(run_master_pipeline, 'cron', hour=hour, minute=minute, id="daily_video", replace_existing=True)
+            scheduler.add_job(run_scheduled_cycle, 'cron', hour=hour, minute=minute, id="daily_video", replace_existing=True)
+            logger.info(f"Scheduled 1x/day video generation cycle for {req.time}")
             
         return {"status": "success", "schedule": data}
     except Exception as e:

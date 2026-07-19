@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -8,10 +9,42 @@ from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+    "https://www.googleapis.com/auth/youtube.readonly"
+]
 
 def get_authenticated_service():
     creds = None
+    
+    # Check for direct environment variables (AWS Production mode)
+    client_id = os.environ.get("YOUTUBE_CLIENT_ID")
+    client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET")
+    refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN")
+    
+    if client_id and client_secret and refresh_token:
+        logger.info("Using YouTube OAuth credentials from environment variables.")
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=SCOPES
+        )
+        # Refresh the token if needed
+        if not creds.valid:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.error(f"Failed to refresh token from env vars: {e}")
+                
+        if creds.valid:
+            return build("youtube", "v3", credentials=creds)
+            
+    # Fallback to local files
+    logger.info("Environment credentials not found or invalid. Falling back to local files.")
     token_path = os.path.join("outputs", "token.json")
     client_secret_path = os.environ.get("YOUTUBE_CLIENT_SECRET_PATH", "credentials.json")
     
@@ -23,7 +56,7 @@ def get_authenticated_service():
             creds.refresh(Request())
         else:
             if not os.path.exists(client_secret_path):
-                raise FileNotFoundError(f"OAuth credentials not found at {client_secret_path}")
+                raise FileNotFoundError(f"OAuth credentials not found at {client_secret_path}. Please set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_REFRESH_TOKEN in .env or provide {client_secret_path}")
             flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
             creds = flow.run_local_server(port=0)
             
@@ -38,7 +71,7 @@ def authenticate():
     get_authenticated_service()
     print("Authentication successful! token.json has been saved in outputs/")
 
-def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, description: str, tags: list) -> tuple:
+def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, description: str, tags: list, privacy: str = "public") -> tuple:
     """
     Uploads a video to YouTube and sets its thumbnail.
     Returns: (youtube_url, video_id)
@@ -47,11 +80,18 @@ def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, descript
     try:
         youtube = get_authenticated_service()
         
-        if "#shorts" not in description.lower():
-            description += "\n\n#shorts #chess #tactics"
-            
+        # Ensure essential tags are present
         if "shorts" not in [t.lower() for t in tags]:
             tags.append("shorts")
+        if "chess" not in [t.lower() for t in tags]:
+            tags.append("chess")
+        if "tactics" not in [t.lower() for t in tags]:
+            tags.append("tactics")
+            
+        # Append tags as visible hashtags in description
+        hashtag_string = " ".join([f"#{t.replace(' ', '')}" for t in tags if t])
+        if hashtag_string not in description:
+            description += f"\n\n{hashtag_string}"
             
         body = {
             "snippet": {
@@ -61,10 +101,14 @@ def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, descript
                 "categoryId": "17"  # Sports
             },
             "status": {
-                "privacyStatus": "public",
+                "privacyStatus": privacy,
                 "selfDeclaredMadeForKids": False
             }
         }
+        
+        logger.info(f"--- YOUTUBE UPLOAD PAYLOAD ---")
+        logger.info(json.dumps(body, indent=2))
+        logger.info(f"------------------------------")
         
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
         

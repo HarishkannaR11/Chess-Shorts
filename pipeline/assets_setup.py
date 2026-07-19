@@ -165,7 +165,9 @@ def get_random_track(format_type: str) -> str | None:
     return chosen
 
 async def setup_music():
-    """No-op for backwards compatibility with main.py, but runs correct_chime check."""
+    """Ensure music folders exist, and runs correct_chime check."""
+    os.makedirs("assets/music/flash", exist_ok=True)
+    os.makedirs("assets/music/story", exist_ok=True)
     correct_chime = os.path.join("assets", "sounds", "correct.wav")
     if not os.path.exists(correct_chime):
         os.makedirs(os.path.dirname(correct_chime), exist_ok=True)

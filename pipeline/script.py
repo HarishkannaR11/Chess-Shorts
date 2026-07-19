@@ -33,7 +33,7 @@ Script must flow like this:
 - Tension: The position looks equal but... (5 seconds)
 - Reveal: The brilliant move and why it works (8 seconds)
 - Lesson: What we learn from this genius (2 seconds)
-- CTA: Follow for more champion moments (2 seconds)
+- CTA: Follow Knightify Chess for daily champion moments (2 seconds)
 
 Total spoken time: exactly 30 seconds when read at normal pace.
 Count words: 30 seconds = approximately 75-80 words total.
@@ -46,7 +46,7 @@ Return ONLY JSON:
   "tension": "max 15 words",
   "reveal": "max 20 words",
   "lesson": "max 10 words",
-  "cta": "Follow for daily champion chess moments",
+  "cta": "Follow Knightify Chess for daily champion chess moments",
   "full_script": "all sections joined as one flowing paragraph, 75 words max",
   "title": "under 60 chars with {player} name",
   "description": "2 sentences",

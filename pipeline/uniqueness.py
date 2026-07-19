@@ -20,10 +20,51 @@ def init_uniqueness_db():
 
 def is_unique(fen: str) -> bool:
     init_uniqueness_db()
+    # 1. Check permanent duplicate in uniqueness.db
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM used_history WHERE fen = ?", (fen,))
-        return cursor.fetchone() is None
+        if cursor.fetchone() is not None:
+            return False
+            
+    # 2. Check 14-day duplicate/near-duplicate in both databases
+    import chess
+    cand_board = chess.Board(fen)
+    cand_placement = fen.split()[0]
+    
+    recent_fens = []
+    # Fetch from uniqueness.db (last 14 days)
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT fen FROM used_history WHERE timestamp >= datetime('now', '-14 days')")
+        recent_fens.extend([r[0] for r in cursor.fetchall() if r[0]])
+        
+    # Fetch from chess_shorts.db (last 14 days)
+    try:
+        with sqlite3.connect("database/chess_shorts.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT fen FROM used_content WHERE created_at >= datetime('now', '-14 days')")
+            recent_fens.extend([r[0] for r in cursor.fetchall() if r[0]])
+    except Exception:
+        pass
+        
+    for ref_fen in set(recent_fens):
+        if ref_fen.split()[0] == cand_placement:
+            return False
+        try:
+            ref_board = chess.Board(ref_fen)
+            diff_squares = 0
+            for sq in chess.SQUARES:
+                if cand_board.piece_at(sq) != ref_board.piece_at(sq):
+                    diff_squares += 1
+                    if diff_squares > 8:
+                        break
+            if diff_squares <= 8:
+                return False
+        except Exception:
+            continue
+            
+    return True
 
 def mark_used(fen: str, player: str, tactic: str):
     init_uniqueness_db()

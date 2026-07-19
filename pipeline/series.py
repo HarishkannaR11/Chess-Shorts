@@ -10,6 +10,7 @@ import asyncio
 from database.db import get_next_puzzle_number, is_fen_used, mark_content_used, get_local_puzzle
 from pipeline.board import generate_series_frames
 from pipeline.audio_check import verify_audio
+from pipeline.ssl_context import get_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ async def fetch_unique_series_puzzle(number: int):
         logger.info(f"Using local puzzle {local_p['puzzle']['id']} (rating {local_p['puzzle']['rating']})")
         return local_p
         
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=get_ssl_context()) as client:
         for attempt in range(40):
             try:
                 resp = await client.get("https://lichess.org/api/puzzle/next")
@@ -102,58 +103,43 @@ async def generate_series(output_base_dir="outputs", target_number=None):
     hook_template = random.choice(SERIES_HOOKS)
     hook_text = hook_template.format(number=number, rating=rating, theme=theme, difficulty=difficulty)
     
-    moves = puzzle_data["game"]["pgn"].split()
+    pgn_str = puzzle_data["game"]["pgn"]
     import chess
-    b = chess.Board()
-    for m in moves:
-        b.push_san(m)
+    if "/" in pgn_str:
+        b = chess.Board(pgn_str)
+    else:
+        moves = pgn_str.split()
+        b = chess.Board()
+        for m in moves:
+            b.push_san(m)
     fen = b.fen()
     sol_moves = puzzle_data["puzzle"]["solution"]
     
-    frames_result = generate_series_frames(fen, sol_moves, number)
+    frames_dir = os.path.join(output_dir, "frames")
+    first_frame = os.path.join(frames_dir, "frame_0000.png")
+    frames_result = generate_series_frames(
+        fen, sol_moves, number,
+        rating=rating,
+        themes=themes,
+        cta_text="Can you solve it? Follow Knightify Chess for more!",
+        output_dir=output_dir
+    )
     frame_paths = frames_result["frames"]
     move_timestamps = frames_result["move_timestamps"]
     
     silent_video = os.path.join(output_dir, "silent.mp4")
     video_path = os.path.join(output_dir, "final.mp4")
     
-    if os.name == 'nt':
-        font_path_ffmpeg = (os.environ.get('WINDIR', 'C:\\Windows') + '\\Fonts\\arialbd.ttf').replace('\\', '/').replace(':', '\\:')
-    else:
-        font_path_ffmpeg = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf".replace('\\', '/').replace(':', '\\:')
-        
-    escaped_hook = hook_text.replace("'", "\\'").replace(":", "\\:")
-    wrapped_hook = "\\n".join(textwrap.wrap(escaped_hook, width=30)[:2])
-    
-    drawtext_filter = (
-        f"scale=1080:1080,pad=1080:1920:0:220:#0d0d0d,"
-        f"drawbox=y=0:w=1080:h=220:color=#210d4d:t=fill,"
-        
-        f"drawtext=text='DAILY CHESS PUZZLE':fontsize=36:fontcolor=#aaaaaa:x=(w-text_w)/2:y=30:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='#{number}':fontsize=110:fontcolor=white:x=(w-text_w)/2:y=80:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='⭐ {rating}':fontsize=30:fontcolor=white:x=1080-text_w-40:y=120:fontfile='{font_path_ffmpeg}',"
-        
-        f"drawtext=text='3':fontsize=80:fontcolor=white:x=(w-text_w)/2:y=1400:fontfile='{font_path_ffmpeg}':enable='between(t,1,2)',"
-        f"drawtext=text='2':fontsize=80:fontcolor=white:x=(w-text_w)/2:y=1400:fontfile='{font_path_ffmpeg}':enable='between(t,2,2.6)',"
-        f"drawtext=text='1':fontsize=80:fontcolor=white:x=(w-text_w)/2:y=1400:fontfile='{font_path_ffmpeg}':enable='between(t,2.6,3)',"
-        f"drawtext=text='Can you find it?':fontsize=52:fontcolor=#FFFF00:x=(w-text_w)/2:y=1550:fontfile='{font_path_ffmpeg}':enable='between(t,0,3)',"
-        
-        f"drawtext=text='✓ {theme} tactic!':fontsize=52:fontcolor=#4CAF50:x=(w-text_w)/2:y=1400:fontfile='{font_path_ffmpeg}':enable='gt(t,5)',"
-        f"drawtext=text='{difficulty.upper()}':fontsize=40:fontcolor=#9C27B0:x=(w-text_w)/2:y=1550:fontfile='{font_path_ffmpeg}':enable='gt(t,5)',"
-        f"drawtext=text='Follow for daily puzzles • #{number}/∞':fontsize=35:fontcolor=#888888:x=(w-text_w)/2:y=1750:fontfile='{font_path_ffmpeg}'"
-    )
-    
-    frames_pattern = os.path.join("outputs", "frames", "frame_%04d.png")
+    frames_pattern = os.path.join(frames_dir, "frame_%04d.png")
     
     cmd1 = [
         "ffmpeg", "-y",
         "-framerate", "30",
         "-i", frames_pattern,
-        "-vf", drawtext_filter,
         "-c:v", "libx264",
+        "-preset", "slow",
+        "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-b:v", "3000k",
-        "-t", "15",
         silent_video
     ]
     run_cmd(cmd1)
@@ -215,12 +201,12 @@ async def generate_series(output_base_dir="outputs", target_number=None):
             cmd2 = ["ffmpeg", "-y", "-i", video_with_sfx, "-stream_loop", "-1", "-i", normalized]
             if has_sfx:
                 cmd2.extend([
-                    "-filter_complex", f"[0:a]volume=1.0[sfx];[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1,atrim=duration={duration}[music];[sfx][music]amix=inputs=2:duration=longest[aout]",
+                    "-filter_complex", f"[0:a]volume=1.0[sfx];[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1,atrim=duration={duration}[music];[sfx][music]amix=inputs=2:duration=longest,loudnorm=I=-14:LRA=11:TP=-1.5[aout]",
                     "-map", "0:v", "-map", "[aout]"
                 ])
             else:
                 cmd2.extend([
-                    "-filter_complex", f"[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1,atrim=duration={duration}[aout]",
+                    "-filter_complex", f"[1:a]volume=0.18,afade=t=in:st=0:d=0.5,afade=t=out:st={duration-1}:d=1,atrim=duration={duration},loudnorm=I=-14:LRA=11:TP=-1.5[aout]",
                     "-map", "0:v", "-map", "[aout]"
                 ])
             cmd2.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", "-t", str(duration), video_path])

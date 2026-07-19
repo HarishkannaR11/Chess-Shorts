@@ -5,6 +5,7 @@ import chess.pgn
 import io
 from typing import Dict, Any
 from pipeline.uniqueness import is_unique, get_variety_constraints, mark_used
+from pipeline.ssl_context import get_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ async def fetch_champion_game(target_player: str = None) -> Dict[str, Any]:
             if not sources: sources = LICHESS_ENDPOINTS
             source = random.choice(sources)
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(verify=get_ssl_context()) as client:
                     resp = await client.get(source["url"])
                     resp.raise_for_status()
                     

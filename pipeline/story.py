@@ -35,15 +35,9 @@ async def generate_story(output_base_dir="outputs"):
     # 2. Generate script
     script_data = generate_script(puzzle_data)
     
-    script_path = os.path.join(output_dir, "script.json")
-    with open(script_path, "w") as f:
-        json.dump({"puzzle": puzzle_data, "script": script_data}, f, indent=4)
-        
-    # 3. Generate voice
-    # User spec: "Generate voice from full_script only"
+    # 3. Generate voice (returns path and word boundaries)
     full_text = script_data.get("full_script", "")
     if not full_text:
-        # Fallback if old format
         text_parts = [
             script_data.get("hook", ""),
             script_data.get("setup", ""),
@@ -54,29 +48,50 @@ async def generate_story(output_base_dir="outputs"):
         ]
         full_text = " ".join([str(p) for p in text_parts if p])
         
-    voice_path = await generate_voice(full_text)
+    voice_path, word_boundaries = await generate_voice(full_text)
     
+    script_path = os.path.join(output_dir, "script.json")
+    with open(script_path, "w") as f:
+        json.dump({
+            "puzzle": puzzle_data, 
+            "script": script_data,
+            "word_boundaries": word_boundaries
+        }, f, indent=4)
+        
     # Move voice file to our directory
     new_voice_path = os.path.join(output_dir, "voice.mp3")
     if os.path.exists(voice_path):
         import shutil
         shutil.move(voice_path, new_voice_path)
     
-    # 4. Generate board frames
+    # 4. Generate board frames (with 3.0s offset word boundaries and story metadata)
     fen = puzzle_data.get("fen", "")
     moves = puzzle_data.get("moves", [])
-    frames_result = generate_frames(fen, moves)
+    
+    offset_word_boundaries = [
+        {
+            "word": wb["word"],
+            "start": wb["start"] + 3.0,
+            "end": wb["end"] + 3.0
+        }
+        for wb in word_boundaries
+    ]
+    
+    frames_result = generate_frames(
+        fen, moves,
+        player=puzzle_data.get('player', 'Player'),
+        opponent=puzzle_data.get('opponent', 'Opponent'),
+        event=puzzle_data.get('event', 'Event'),
+        year=str(puzzle_data.get('year', '2023')),
+        section_times=offset_word_boundaries,
+        cta_text=script_data.get("cta", "Comment your move before I show mine!"),
+        output_dir=output_dir
+    )
     frames_paths = frames_result["frames"]
     move_timestamps = frames_result["move_timestamps"]
     
-    # Move frames to our directory
     frames_dir = os.path.join(output_dir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-    import shutil
-    for fp in frames_paths:
-        if os.path.exists(fp):
-            shutil.move(fp, os.path.join(frames_dir, os.path.basename(fp)))
-            
+    
     # 5. Combine video
     video_output_path = os.path.join(output_dir, "final.mp4")
     final_video = combine_video(script_path, new_voice_path, frames_dir, video_output_path, move_timestamps=move_timestamps)

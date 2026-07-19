@@ -64,51 +64,6 @@ def combine_video(script_path: str, voice_path: str, frames_dir: str, output_pat
     os.makedirs("outputs", exist_ok=True)
     os.makedirs(frames_dir, exist_ok=True)
     
-    with open(script_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    
-    script_data = data.get("script", {})
-    puzzle_data = data.get("puzzle", {})
-    
-    if os.name == 'nt':
-        font_path = os.environ.get('WINDIR', 'C:\\Windows') + '\\Fonts\\arialbd.ttf'
-        font_path_ffmpeg = font_path.replace('\\', '/').replace(':', '\\:')
-    else:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        font_path_ffmpeg = font_path.replace('\\', '/').replace(':', '\\:')
-
-    # Get voice duration
-    voice_info = verify_audio(voice_path)
-    if not voice_info.get("has_audio"):
-        raise ValueError(f"Audio lost at voice generation - check {voice_path}")
-    total_voice_duration = voice_info["duration"]
-
-    # Calculate dynamic caption times
-    sections = {
-        "hook": script_data.get("hook", ""),
-        "setup": script_data.get("setup", ""),
-        "tension": script_data.get("tension", ""),
-        "reveal": script_data.get("reveal", ""),
-        "lesson": script_data.get("lesson", ""),
-        "cta": script_data.get("cta", "")
-    }
-    
-    total_words = sum(len(s.split()) for s in sections.values() if s)
-    current_time = 0.0
-    section_times = {}
-    
-    for name, text in sections.items():
-        if not text:
-            continue
-        word_count = len(text.split())
-        duration = (word_count / total_words) * total_voice_duration if total_words > 0 else 0
-        section_times[name] = {
-            "start": current_time,
-            "end": current_time + duration,
-            "text": text
-        }
-        current_time += duration
-
     # 1. Frames -> silent video
     silent_video = os.path.join("outputs", "video_silent.mp4")
     frames_pattern = os.path.join(frames_dir, "frame_%04d.png")
@@ -118,8 +73,9 @@ def combine_video(script_path: str, voice_path: str, frames_dir: str, output_pat
         "-framerate", "30",
         "-i", frames_pattern,
         "-c:v", "libx264",
+        "-preset", "slow",
+        "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-t", "30",
         silent_video
     ]
     run_cmd(cmd1)
@@ -144,7 +100,6 @@ def combine_video(script_path: str, voice_path: str, frames_dir: str, output_pat
             
             if os.path.exists(sound_path):
                 inputs.extend(["-i", sound_path])
-                # We start adding inputs from index 1
                 filter_parts.append(
                     f"[{i+1}:a]adelay={delay_ms}|{delay_ms},"
                     f"volume=0.8[s{i}]"
@@ -182,7 +137,6 @@ def combine_video(script_path: str, voice_path: str, frames_dir: str, output_pat
         "-i", video_with_sfx,
         "-i", voice_path
     ]
-    # Check if sfx video has audio
     has_sfx = verify_audio(video_with_sfx).get("has_audio")
     
     if has_sfx:
@@ -207,75 +161,33 @@ def combine_video(script_path: str, voice_path: str, frames_dir: str, output_pat
     if not verify_audio(video_with_voice).get("has_audio"):
         raise ValueError("Audio lost at step 3 (Voice) - check FFmpeg command")
 
-    # Step 4: Add Captions to video_with_voice -> video_captioned.mp4
-    video_captioned = os.path.join("outputs", "video_captioned.mp4")
-    filters = []
-    
-    # Base text
-    player = puzzle_data.get("player", "Player").replace("'", "’").replace(":", "\\:")
-    opponent = puzzle_data.get("opponent", "Opponent").replace("'", "’").replace(":", "\\:")
-    event_str = f"{puzzle_data.get('event', 'Event')} {puzzle_data.get('year', '2023')}".replace("'", "’").replace(":", "\\:")
-    
-    filters.append(
-        f"scale=1080:1080,pad=1080:1920:0:280:black,"
-        f"drawtext=text='{player}':fontsize=52:fontcolor=#FFD700:x=(w-text_w)/2:y=80:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='vs':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=140:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='{opponent}':fontsize=52:fontcolor=white:x=(w-text_w)/2:y=180:fontfile='{font_path_ffmpeg}',"
-        f"drawtext=text='{event_str}':fontsize=34:fontcolor=gray:x=(w-text_w)/2:y=240:fontfile='{font_path_ffmpeg}'"
-    )
-    
-    for name, data in section_times.items():
-        text = "\\n".join(textwrap.wrap(data["text"], width=30)[:2])
-        text = text.replace("'", "’").replace(":", "\\:")
-        
-        filters.append(
-            f"drawtext=text='{text}':"
-            f"fontfile='{font_path_ffmpeg}':"
-            f"fontsize=52:"
-            f"fontcolor=white:"
-            f"x=(w-text_w)/2:"
-            f"y=1450:"
-            f"borderw=4:"
-            f"bordercolor=black:"
-            f"enable='between(t,{data['start']:.2f},{data['end']:.2f})'"
-        )
-    
-    caption_filter = ",".join(filters)
-    
-    cmd4 = [
-        "ffmpeg", "-y",
-        "-i", video_with_voice,
-        "-vf", caption_filter,
-        "-c:v", "libx264", "-b:v", "2500k",
-        "-c:a", "copy",
-        video_captioned
-    ]
-    run_cmd(cmd4)
-
     # Step 5: Add background music
     from pipeline.assets_setup import get_random_track
     import shutil
     
     track = get_random_track("story")
     if not track:
-        shutil.copy(video_captioned, output_path)
+        shutil.copy(video_with_voice, output_path)
     else:
         normalized = normalize_music_file(track)
         if not normalized:
-            shutil.copy(video_captioned, output_path)
+            shutil.copy(video_with_voice, output_path)
         else:
+            duration = get_video_duration(video_with_voice)
+            fade_out_start = max(0, duration - 3.0)
             cmd5 = [
                 "ffmpeg", "-y",
-                "-i", video_captioned,
+                "-i", video_with_voice,
                 "-stream_loop", "-1", "-i", normalized,
                 "-filter_complex", (
-                    "[0:a]volume=1.0[voicesfx];"
-                    "[1:a]volume=0.12,afade=t=in:st=0:d=2,afade=t=out:st=27:d=3[music];"
-                    "[voicesfx][music]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+                    f"[0:a]volume=1.0[voicesfx];"
+                    f"[1:a]volume=0.12,afade=t=in:st=0:d=2,afade=t=out:st={fade_out_start}:d=3[music];"
+                    f"[voicesfx][music]amix=inputs=2:duration=longest:dropout_transition=2,"
+                    f"loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
                 ),
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-                "-t", "30",
+                "-t", str(duration),
                 output_path
             ]
             run_cmd(cmd5)

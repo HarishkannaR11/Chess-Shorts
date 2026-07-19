@@ -15,3 +15,7 @@ google-auth-oauthlib
 google-auth-httplib2
 aiosqlite
 apscheduler
+truststore
+Flask
+gunicorn
+google-auth

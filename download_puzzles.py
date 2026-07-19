@@ -13,7 +13,7 @@ def download_puzzles(limit=50000):
         
         dctx = zstd.ZstdDecompressor()
         
-        conn = sqlite3.connect('chess_shorts.db')
+        conn = sqlite3.connect('database/chess_shorts.db')
         c = conn.cursor()
         
         with dctx.stream_reader(r.raw) as reader:

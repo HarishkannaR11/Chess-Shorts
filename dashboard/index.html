@@ -148,7 +148,14 @@
     <div class="panel">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <h2>Video Queue</h2>
-            <div style="display: flex; gap: 10px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <label style="color: #ccc; font-size: 14px;">Upload as:</label>
+                <select id="globalPrivacy" style="padding: 5px; background: #222; color: white; border: 1px solid #444; border-radius: 4px; font-size: 14px;">
+                    <option value="private">Private</option>
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public" selected>Public</option>
+                </select>
+                <div style="width: 20px;"></div>
                 <button class="btn" style="padding: 5px 15px; font-size: 14px; background: #444;" onclick="filterQueue('all')">All Videos</button>
                 <button class="btn" style="padding: 5px 15px; font-size: 14px; background: #2196F3;" onclick="filterQueue('flash')">⚡ Flash</button>
                 <button class="btn" style="padding: 5px 15px; font-size: 14px; background: #4CAF50;" onclick="filterQueue('story')">👑 Story</button>
@@ -384,12 +391,13 @@
     }
 
     async function uploadVideo(id) {
-        if(!confirm("Upload this video to YouTube as Private?")) return;
+        const privacy = document.getElementById('globalPrivacy').value;
+        if(!confirm(`Upload this video to YouTube as ${privacy.toUpperCase()}?`)) return;
         try {
             const res = await fetch('/upload', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ video_id: id })
+                body: JSON.stringify({ video_id: id, privacy_status: privacy })
             });
             if (!res.ok) throw new Error("Upload failed");
             const data = await res.json();
