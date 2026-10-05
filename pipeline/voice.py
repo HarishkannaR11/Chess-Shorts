@@ -175,6 +175,8 @@ async def generate_voice(text: str,
             rate="+8%",
             volume="+10%",
             pitch="-8Hz",
+            # edge-tts 7+ only sends per-word timings (used for captions) when asked
+            boundary="WordBoundary",
         )
 
         wbs: list[dict] = []
