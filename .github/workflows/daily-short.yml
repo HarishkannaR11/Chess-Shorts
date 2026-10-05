@@ -29,9 +29,6 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write  # push the database to the bot-state branch
-
 concurrency:
   group: daily-short
   cancel-in-progress: false
@@ -43,6 +40,11 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write  # push the database to the bot-state branch
+      pages: read      # check whether the status page can be deployed
+    outputs:
+      pages: ${{ steps.page.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
 
@@ -132,6 +134,26 @@ jobs:
           commit=$(git commit-tree "$tree" "${parent_args[@]}" -m "State after run $GITHUB_RUN_ID ($(date -u +%F))")
           git push origin "$commit:refs/heads/$STATE_BRANCH"
 
+      - name: Build status page
+        id: page
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python status_page.py --out site
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+          if [ "$code" = "200" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Status page not deployed: turn on GitHub Pages in Settings > Pages > Source: GitHub Actions."
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        if: always() && steps.page.outputs.enabled == 'true'
+        with:
+          path: site
+
       - name: Attach the video to this run
         if: always()
         uses: actions/upload-artifact@v4
@@ -143,3 +165,17 @@ jobs:
             outputs/last_run.json
           if-no-files-found: ignore
           retention-days: 14
+
+  status-page:
+    needs: publish
+    if: always() && needs.publish.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

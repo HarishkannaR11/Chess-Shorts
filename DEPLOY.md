@@ -47,14 +47,18 @@ Two ways to run it daily. **Pick one** (running both publishes twice):
    | `YOUTUBE_REFRESH_TOKEN` | from `youtube_auth.py` |
    | `GROQ_API_KEY` | your Groq key. Optional: without it the Story format is skipped |
 
+   The Story format picks finishes from recent games of the players in `GAME_SOURCES` (`pipeline/puzzle.py`), from Lichess and chess.com. The smoke test lists which of those accounts are reachable.
+
 3. **Dry run:** **Actions → Daily Short → Run workflow**, untick *Upload to YouTube*, run. When it finishes, download the video from the run's **Artifacts** and watch it.
 4. **First real upload:** run it again with upload ticked (choose *unlisted* if you want to check it on YouTube first).
+5. **Turn on the status page (one time):** repo **Settings → Pages → Build and deployment → Source: GitHub Actions**. After the next run, the page is live at **https://harishkannar11.github.io/Chess-Shorts/**. It shows the last run's outcome (with the error if it failed), recent Shorts with their YouTube links, the next run time and format. Until Pages is on, runs just show a warning and skip the page.
 
 From then on it runs every day at **09:17 UTC**. To change the time, edit the `cron:` line in `.github/workflows/daily-short.yml` (cron times are always UTC). You can still trigger extra runs from the Actions tab with a specific format or privacy.
 
 **How it works**
 
 - **State lives on the `bot-state` branch.** Each run restores `chess_shorts.db` and `uniqueness.db` from it and commits the updated copies back (about 50 KB; the 50k-puzzle cache is re-downloaded each run). Don't delete or merge that branch: it's what stops puzzles repeating and keeps the Series numbering going.
+- **The status page is rebuilt after every run**, including failed ones, so it's the one place to check that the channel is still posting. The same data is at `/status.json`.
 - **Every run attaches the rendered video** (and `last_run.json`) to the run page for 14 days. The run summary shows the YouTube link.
 - **Failures** show as a red ❌ in the Actions tab, and GitHub emails you (default notification settings).
 - **The Smoke test workflow** renders a Flash and a Series video on every push that touches the pipeline, so breakage shows up before the daily run.

@@ -91,7 +91,7 @@ python publish.py              # generate + publish
 python publish.py --no-upload  # dry run
 ```
 
-The included GitHub Actions workflow (`.github/workflows/daily-short.yml`) runs it every day for free. See **[DEPLOY.md](DEPLOY.md)** for setup, a VM/cron alternative, and the YouTube API settings you need for unattended uploads.
+The included GitHub Actions workflow (`.github/workflows/daily-short.yml`) runs it every day for free and publishes a status page (`status_page.py`) to GitHub Pages. See **[DEPLOY.md](DEPLOY.md)** for setup, a VM/cron alternative, and the YouTube API settings you need for unattended uploads.
 
 ## 🎥 Pipeline Workflow
 1. **Scraping:** Grabs a puzzle/game from Lichess (or local DB).
