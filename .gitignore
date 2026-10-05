@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 credentials.json
+client_secret.json
 token.json
 
 # Outputs & DB

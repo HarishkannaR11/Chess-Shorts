@@ -1,0 +1,97 @@
+name: Smoke test
+
+# Renders Flash and Series Shorts without uploading, and checks the Story
+# format's data sources, so pipeline breakage shows up before the daily job.
+# The rendered videos are attached to the run.
+on:
+  push:
+    paths:
+      - "pipeline/**"
+      - "database/**"
+      - "publish.py"
+      - "status_page.py"
+      - "download_puzzles.py"
+      - "requirements.txt"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "pipeline/**"
+      - "database/**"
+      - "publish.py"
+      - "status_page.py"
+      - "download_puzzles.py"
+      - "requirements.txt"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Render Flash and Series (no upload)
+        run: |
+          python publish.py --no-upload --format flash
+          python publish.py --no-upload --format series
+
+      - name: Build status page
+        run: python status_page.py --out site
+
+      - name: Check Story sources (champion games + text-to-speech)
+        run: |
+          python - <<'EOF'
+          import asyncio
+          import httpx
+          from pipeline.puzzle import GAME_SOURCES, USER_AGENT, _fetch_recent_games, _extract_finish, fetch_champion_game
+          from pipeline.ssl_context import get_ssl_context
+          from pipeline.voice import generate_voice
+
+          async def main():
+              # Per-source health, so a renamed or closed account shows up here
+              async with httpx.AsyncClient(verify=get_ssl_context(), timeout=30, follow_redirects=True,
+                                           headers={"User-Agent": USER_AGENT}) as client:
+                  for s in GAME_SOURCES:
+                      label = f"{s['player']} ({s['site']}: {s['user']})"
+                      try:
+                          games = await _fetch_recent_games(client, s)
+                          usable = sum(1 for g in games if _extract_finish(g["pgn"], s))
+                          print(f"OK    {label}: {len(games)} games, {usable} checkmate finishes")
+                      except httpx.HTTPStatusError as e:
+                          print(f"FAIL  {label}: HTTP {e.response.status_code}")
+                      except Exception as e:
+                          print(f"FAIL  {label}: {e}")
+                      await asyncio.sleep(1)
+
+              game = await fetch_champion_game(allow_fallback=False)
+              print(f"Story game OK: {game['player']} vs {game['opponent']} ({game['event']}, {len(game['moves'])} plies)")
+              path, words = await generate_voice("Smoke test. The knight jumps in for checkmate.")
+              assert words, "TTS returned no word timings"
+              print(f"TTS OK: {path}, {len(words)} words")
+
+          asyncio.run(main())
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-videos
+          path: |
+            outputs/*/final.mp4
+            site/index.html
+          if-no-files-found: ignore
+          retention-days: 7

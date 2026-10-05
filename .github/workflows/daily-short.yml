@@ -1,0 +1,181 @@
+name: Daily Short
+
+# Generates one chess Short and publishes it to YouTube every day.
+# The SQLite database (what's been published, series numbering, puzzle
+# history) lives on the `bot-state` branch between runs.
+on:
+  schedule:
+    # 09:17 UTC daily. Change to taste (cron is always UTC). GitHub may start a
+    # scheduled run late; the job skips itself if a Short went out in the last 20h.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      format:
+        description: Format to generate
+        type: choice
+        options: [auto, flash, story, series]
+        default: auto
+      privacy:
+        description: YouTube privacy status
+        type: choice
+        options: [public, unlisted, private]
+        default: public
+      upload:
+        description: Upload to YouTube (untick for a dry run; the video is still attached to the run)
+        type: boolean
+        default: true
+      force:
+        description: Publish even if a Short already went out in the last 20 hours
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-short
+  cancel-in-progress: false
+
+env:
+  STATE_BRANCH: bot-state
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write  # push the database to the bot-state branch
+      pages: read      # check whether the status page can be deployed
+    outputs:
+      pages: ${{ steps.page.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database from the state branch
+        id: restore
+        run: |
+          set +e
+          git ls-remote --exit-code --heads origin "$STATE_BRANCH" > /dev/null
+          rc=$?
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "No $STATE_BRANCH branch yet - starting from a fresh database."
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Could not check for the $STATE_BRANCH branch (git exit $rc)"
+            exit "$rc"
+          fi
+          git fetch --depth=1 origin "$STATE_BRANCH"
+          echo "parent=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          for f in chess_shorts.db uniqueness.db; do
+            if git cat-file -e "FETCH_HEAD:$f" 2>/dev/null; then
+              git cat-file blob "FETCH_HEAD:$f" > "database/$f"
+            fi
+          done
+          ls -la database
+
+      - name: Generate and publish
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FORMAT: ${{ inputs.format || 'auto' }}
+          PRIVACY: ${{ inputs.privacy || vars.YOUTUBE_PRIVACY || 'public' }}
+          UPLOAD: ${{ inputs.upload }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=(--format "$FORMAT" --privacy "$PRIVACY")
+          if [ "$UPLOAD" = "false" ]; then args+=(--no-upload); fi
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          python publish.py "${args[@]}"
+
+      - name: Save database to the state branch
+        # Also after a failed run: puzzles that were already used stay marked as used
+        if: always() && steps.restore.outcome == 'success'
+        env:
+          PARENT: ${{ steps.restore.outputs.parent }}
+        run: |
+          if [ ! -f database/chess_shorts.db ]; then
+            echo "No database to save."
+            exit 0
+          fi
+          mkdir -p state
+          python - <<'EOF'
+          import shutil, sqlite3
+          src = sqlite3.connect("database/chess_shorts.db")
+          dst = sqlite3.connect("state/chess_shorts.db")
+          src.backup(dst)
+          # The 50k-puzzle cache is re-downloaded every run; dropping it keeps the branch small
+          dst.execute("DELETE FROM local_puzzles")
+          dst.commit()
+          dst.execute("VACUUM")
+          dst.close()
+          shutil.copy("database/uniqueness.db", "state/uniqueness.db")
+          EOF
+          export GIT_AUTHOR_NAME="github-actions[bot]"
+          export GIT_AUTHOR_EMAIL="41898299+github-actions[bot]@users.noreply.github.com"
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          tree=$(printf '100644 blob %s\tchess_shorts.db\n100644 blob %s\tuniqueness.db\n' \
+            "$(git hash-object -w state/chess_shorts.db)" \
+            "$(git hash-object -w state/uniqueness.db)" | git mktree)
+          parent_args=()
+          if [ -n "$PARENT" ]; then parent_args=(-p "$PARENT"); fi
+          commit=$(git commit-tree "$tree" "${parent_args[@]}" -m "State after run $GITHUB_RUN_ID ($(date -u +%F))")
+          git push origin "$commit:refs/heads/$STATE_BRANCH"
+
+      - name: Build status page
+        id: page
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python status_page.py --out site
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+          if [ "$code" = "200" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Status page not deployed: turn on GitHub Pages in Settings > Pages > Source: GitHub Actions."
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        if: always() && steps.page.outputs.enabled == 'true'
+        with:
+          path: site
+
+      - name: Attach the video to this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ github.run_id }}
+          path: |
+            outputs/*/final.mp4
+            outputs/*/thumbnail.png
+            outputs/last_run.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  status-page:
+    needs: publish
+    if: always() && needs.publish.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

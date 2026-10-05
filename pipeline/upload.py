@@ -1,7 +1,10 @@
 import os
 import json
+import time
 import logging
+import httplib2
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -15,6 +18,31 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly"
 ]
 
+# Transient server errors worth retrying during a resumable upload
+RETRIABLE_STATUS = {500, 502, 503, 504}
+MAX_UPLOAD_RETRIES = 5
+
+def _clean_text(text: str, max_bytes: int) -> str:
+    """YouTube rejects '<' and '>' in titles/descriptions and enforces byte limits."""
+    text = (text or "").replace("<", "").replace(">", "").strip()
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore").strip()
+
+def _clean_tags(tags: list) -> list:
+    """Dedupe tags and keep them under YouTube's 500-character total."""
+    cleaned, seen, total = [], set(), 0
+    for tag in tags:
+        tag = str(tag).replace("<", "").replace(">", "").replace(",", " ").strip().lstrip("#").strip()
+        if not tag or tag.lower() in seen:
+            continue
+        # YouTube counts quotes around tags containing spaces, plus separators
+        cost = len(tag) + (2 if " " in tag else 0) + (1 if cleaned else 0)
+        if total + cost > 500:
+            break
+        cleaned.append(tag)
+        seen.add(tag.lower())
+        total += cost
+    return cleaned
+
 def get_authenticated_service():
     creds = None
     
@@ -25,24 +53,28 @@ def get_authenticated_service():
     
     if client_id and client_secret and refresh_token:
         logger.info("Using YouTube OAuth credentials from environment variables.")
+        # No `scopes` here on purpose: Google rejects a refresh that asks for
+        # scopes the token wasn't granted (invalid_scope). Leaving them out
+        # returns whatever the token was minted with.
         creds = Credentials(
             token=None,
             refresh_token=refresh_token,
             client_id=client_id,
             client_secret=client_secret,
             token_uri="https://oauth2.googleapis.com/token",
-            scopes=SCOPES
         )
-        # Refresh the token if needed
-        if not creds.valid:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                logger.error(f"Failed to refresh token from env vars: {e}")
-                
-        if creds.valid:
-            return build("youtube", "v3", credentials=creds)
-            
+        # When env credentials are set we're usually headless (server/CI), so
+        # fail loudly instead of falling through to the interactive browser flow.
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            raise RuntimeError(
+                "YouTube refresh token was rejected. Re-run `python youtube_auth.py` and update "
+                "YOUTUBE_REFRESH_TOKEN. If this keeps happening every ~7 days, publish your OAuth "
+                f"consent screen ('In production') in Google Cloud Console. Details: {e}"
+            ) from e
+        return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
     # Fallback to local files
     logger.info("Environment credentials not found or invalid. Falling back to local files.")
     token_path = os.path.join("outputs", "token.json")
@@ -81,17 +113,16 @@ def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, descript
         youtube = get_authenticated_service()
         
         # Ensure essential tags are present
-        if "shorts" not in [t.lower() for t in tags]:
-            tags.append("shorts")
-        if "chess" not in [t.lower() for t in tags]:
-            tags.append("chess")
-        if "tactics" not in [t.lower() for t in tags]:
-            tags.append("tactics")
+        tags = _clean_tags(list(tags) + ["shorts", "chess", "tactics"])
             
         # Append tags as visible hashtags in description
+        description = description or ""
         hashtag_string = " ".join([f"#{t.replace(' ', '')}" for t in tags if t])
         if hashtag_string not in description:
             description += f"\n\n{hashtag_string}"
+
+        title = _clean_text(title, 100) or "Chess Puzzle"
+        description = _clean_text(description, 5000)
             
         body = {
             "snippet": {
@@ -119,8 +150,20 @@ def upload_to_youtube(video_path: str, thumbnail_path: str, title: str, descript
         )
         
         response = None
+        retries = 0
         while response is None:
-            status, response = request.next_chunk()
+            try:
+                status, response = request.next_chunk()
+            except (HttpError, OSError, httplib2.HttpLib2Error) as e:
+                if isinstance(e, HttpError) and e.resp.status not in RETRIABLE_STATUS:
+                    raise
+                retries += 1
+                if retries > MAX_UPLOAD_RETRIES:
+                    raise
+                wait = 2 ** retries
+                logger.warning(f"Upload interrupted ({e}); retrying in {wait}s ({retries}/{MAX_UPLOAD_RETRIES})")
+                time.sleep(wait)
+                continue
             if status:
                 logger.info(f"Uploaded {int(status.progress() * 100)}%")
                 

@@ -66,7 +66,8 @@ By integrating `APScheduler`, the system is capable of running as a background d
 - **Video Rendering:** Pillow (PIL) for frame generation, FFmpeg for compositing and audio mixing
 - **Database:** SQLite
 - **APIs:** Lichess API, YouTube Data API v3, Google OAuth2
-- **AI/TTS:** Local/Cloud LLMs for script generation, Kokoro for TTS
+- **AI/TTS:** Groq (Llama 3.3) for script generation, Microsoft Edge TTS (`edge-tts`) for voiceover
+- **Deployment:** GitHub Actions (daily scheduled publish) or any VM with cron
 
 ## ⚙️ Setup & Installation
 
@@ -75,12 +76,22 @@ By integrating `APScheduler`, the system is capable of running as a background d
    pip install -r requirements.txt
    ```
 2. **Install FFmpeg:** Ensure `ffmpeg` is installed and added to your system's PATH.
-3. **Environment Variables:** Create a `.env` file and configure your API keys (e.g., Groq API, TTS endpoints).
-4. **YouTube Credentials:** Place your Google Cloud `credentials.json` in the root directory for OAuth2 authentication.
+3. **Environment Variables:** Create a `.env` file with `GROQ_API_KEY` (used by the Story format).
+4. **YouTube Credentials:** Save your Google Cloud OAuth client as `client_secret.json`, run `python youtube_auth.py`, and add the printed `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` and `YOUTUBE_REFRESH_TOKEN` to `.env`.
 5. **Run the Server:**
    ```bash
    uvicorn main:app --reload
    ```
+
+## ☁️ Automated Daily Publishing
+`publish.py` generates the next Short in the rotation, checks it, and uploads it to YouTube in one unattended run:
+
+```bash
+python publish.py              # generate + publish
+python publish.py --no-upload  # dry run
+```
+
+The included GitHub Actions workflow (`.github/workflows/daily-short.yml`) runs it every day for free and publishes a status page (`status_page.py`) to GitHub Pages. See **[DEPLOY.md](DEPLOY.md)** for setup, a VM/cron alternative, and the YouTube API settings you need for unattended uploads.
 
 ## 🎥 Pipeline Workflow
 1. **Scraping:** Grabs a puzzle/game from Lichess (or local DB).

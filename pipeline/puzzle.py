@@ -1,4 +1,5 @@
 import httpx
+import asyncio
 import logging
 import random
 import chess.pgn
@@ -192,116 +193,143 @@ FAMOUS_POSITIONS = [
     }
 ]
 
-LICHESS_ENDPOINTS = [
-    {"player": "Magnus Carlsen", "url": "https://lichess.org/api/games/user/DrNykterstein?max=50&rated=true&perfType=classical,rapid,blitz"},
-    {"player": "Praggnanandhaa R", "url": "https://lichess.org/api/games/user/rpragchess?max=50&rated=true"},
-    {"player": "Daniel Naroditsky", "url": "https://lichess.org/api/games/user/DanielNaroditsky?max=50&rated=true"},
-    {"player": "Nihal Sarin", "url": "https://lichess.org/api/games/user/nihalsarin2004?max=50&rated=true"},
-    {"player": "Alireza Firouzja", "url": "https://lichess.org/api/games/user/AlirezaFirouzja?max=50&rated=true"}
+USER_AGENT = "KnightifyChessShorts/1.0 (+https://github.com/HarishkannaR11/Chess-Shorts)"
+
+# Where to pull each champion's recent games from. Usernames are per site:
+# the same player usually has different Lichess and chess.com handles.
+GAME_SOURCES = [
+    {"player": "Magnus Carlsen", "site": "lichess", "user": "DrNykterstein"},
+    {"player": "Magnus Carlsen", "site": "chesscom", "user": "MagnusCarlsen"},
+    {"player": "Hikaru Nakamura", "site": "chesscom", "user": "Hikaru"},
+    {"player": "Praggnanandhaa R", "site": "chesscom", "user": "rpragchess"},
+    {"player": "Alireza Firouzja", "site": "chesscom", "user": "AlirezaFirouzja"},
+    {"player": "Alireza Firouzja", "site": "lichess", "user": "alireza2003"},
+    {"player": "Daniel Naroditsky", "site": "chesscom", "user": "DanielNaroditsky"},
+    {"player": "Nihal Sarin", "site": "chesscom", "user": "nihalsarin"},
+    {"player": "Fabiano Caruana", "site": "chesscom", "user": "FabianoCaruana"},
+    {"player": "Gukesh D", "site": "chesscom", "user": "GukeshDommaraju"},
 ]
 
-async def fetch_champion_game(target_player: str = None) -> Dict[str, Any]:
+async def _fetch_recent_games(client: httpx.AsyncClient, source: dict) -> list:
+    """Recent games for a source as [{"pgn", "event"}]. Raises on HTTP errors."""
+    if source["site"] == "lichess":
+        resp = await client.get(
+            f"https://lichess.org/api/games/user/{source['user']}",
+            params={"max": 100, "rated": "true"},
+            headers={"Accept": "application/x-chess-pgn"},
+        )
+        resp.raise_for_status()
+        return [{"pgn": p, "event": None} for p in resp.text.strip().split("\n\n\n") if p.strip()]
+
+    # chess.com: monthly archives, newest last. Keep only wins by checkmate.
+    resp = await client.get(f"https://api.chess.com/pub/player/{source['user'].lower()}/games/archives")
+    resp.raise_for_status()
+    games = []
+    for url in reversed(resp.json().get("archives", [])[-3:]):
+        month = await client.get(url)
+        month.raise_for_status()
+        for g in month.json().get("games", []):
+            if g.get("rules") != "chess" or "pgn" not in g:
+                continue
+            champ = "white" if g["white"].get("username", "").lower() == source["user"].lower() else "black"
+            other = "black" if champ == "white" else "white"
+            if g[champ].get("result") == "win" and g[other].get("result") == "checkmated":
+                games.append({"pgn": g["pgn"], "event": f"{g.get('time_class', 'online').capitalize()} game on Chess.com"})
+    return games
+
+def _extract_finish(pgn_text: str, source: dict, extract_len: int = 12) -> Dict[str, Any] | None:
+    """The last `extract_len` plies of a game the champion won by checkmate, else None."""
+    game = chess.pgn.read_game(io.StringIO(pgn_text))
+    if not game:
+        return None
+    moves = list(game.mainline_moves())
+    if len(moves) < 20:
+        return None
+
+    white = game.headers.get("White", "Unknown")
+    black = game.headers.get("Black", "Unknown")
+    user = source["user"].lower()
+    if user not in (white.lower(), black.lower()):
+        return None
+    champ_color = chess.WHITE if white.lower() == user else chess.BLACK
+
+    board = game.board()
+    for m in moves:
+        board.push(m)
+    # After mate it's the mated side's turn: make sure that's not the champion
+    if not board.is_checkmate() or board.turn == champ_color:
+        return None
+
+    start_ply = len(moves) - extract_len
+    start_board = game.board()
+    for m in moves[:start_ply]:
+        start_board.push(m)
+    date = game.headers.get("Date", "")
+    return {
+        "fen": start_board.fen(),
+        "moves": [m.uci() for m in moves[start_ply:]],
+        "opponent": black if champ_color == chess.WHITE else white,
+        "year": date.split(".")[0] if "." in date else "2023",
+        "event": game.headers.get("Event", "Online game"),
+    }
+
+async def fetch_champion_game(target_player: str = None, allow_fallback: bool = True) -> Dict[str, Any]:
     """
-    Fetch a real champion game either from Lichess or hardcoded famous positions.
+    Fetch the checkmating finish of a real champion game from Lichess or
+    chess.com (hardcoded famous positions only if allow_fallback).
     Guarantees uniqueness through pipeline.uniqueness module.
     """
     constraints = get_variety_constraints()
     avoid_player = constraints.get("avoid_player")
-    avoid_tactic = constraints.get("avoid_tactic")
-    
-    for attempt in range(10): # retry loop
-        if False: # Disabled to enforce strict checkmate endings
-            # Hardcoded
-            pool = [p for p in FAMOUS_POSITIONS if p["player"] != avoid_player and p["tactic"] != avoid_tactic]
-            if target_player:
-                pool = [p for p in FAMOUS_POSITIONS if p["player"] == target_player]
-            if not pool: pool = FAMOUS_POSITIONS
-            game = random.choice(pool)
-            if is_unique(game["fen"]):
-                mark_used(game["fen"], game["player"], game["tactic"])
-                return {
-                    "fen": game["fen"],
-                    "moves": game["moves"],
-                    "player": game["player"],
-                    "opponent": game["opponent"],
-                    "event": game["event"],
-                    "year": game["year"],
-                    "tactic": game["tactic"],
-                    "rating": 2800,
-                    "themes": [game["tactic"].lower().replace(" ", "_")],
-                    "source": "hardcoded"
-                }
-        else:
-            # Lichess live
-            sources = [s for s in LICHESS_ENDPOINTS if s["player"] != avoid_player]
-            if target_player:
-                sources = [s for s in LICHESS_ENDPOINTS if s["player"] == target_player]
-            if not sources: sources = LICHESS_ENDPOINTS
-            source = random.choice(sources)
+
+    # Requested player first, then everyone else (skipping the last player used)
+    preferred = [s for s in GAME_SOURCES if s["player"] == target_player]
+    others = [s for s in GAME_SOURCES if s not in preferred and s["player"] != avoid_player]
+    random.shuffle(preferred)
+    random.shuffle(others)
+
+    backed_off = False
+    async with httpx.AsyncClient(verify=get_ssl_context(), timeout=30, follow_redirects=True,
+                                 headers={"User-Agent": USER_AGENT}) as client:
+        for source in preferred + others:
+            label = f"{source['player']} ({source['site']}: {source['user']})"
             try:
-                async with httpx.AsyncClient(verify=get_ssl_context()) as client:
-                    resp = await client.get(source["url"])
-                    resp.raise_for_status()
-                    
-                    # Basic parsing to extract PGN strings
-                    pgns = resp.text.strip().split("\n\n\n")
-                    random.shuffle(pgns)
-                    
-                    for pgn_text in pgns:
-                        if not pgn_text.strip(): continue
-                        game = chess.pgn.read_game(io.StringIO(pgn_text))
-                        if not game: continue
-                        
-                        board = game.board()
-                        moves = list(game.mainline_moves())
-                        if len(moves) < 20: continue
-                        
-                        # We want the last 6 full moves (12 plies) of the game.
-                        extract_len = 12
-                        start_ply = max(0, len(moves) - extract_len)
-                        
-                        temp_board = game.board()
-                        for m in moves[:start_ply]:
-                            temp_board.push(m)
-                            
-                        fen = temp_board.fen()
-                        next_moves = [m.uci() for m in moves[start_ply:]]
-                        
-                        if is_unique(fen):
-                            white = game.headers.get("White", "Unknown")
-                            black = game.headers.get("Black", "Unknown")
-                            opponent = black if white == source["player"] else white
-                            
-                            year_full = game.headers.get("Date", "????")
-                            year = year_full.split(".")[0] if "." in year_full else "2023"
-                            event = game.headers.get("Event", "Lichess Master Game")
-                            
-                            # Check if it's an actual mate on board
-                            for m in moves[start_ply:]:
-                                temp_board.push(m)
-                            
-                            if not temp_board.is_checkmate():
-                                continue
-                                
-                            tactic = "Checkmate sequence"
-                            
-                            mark_used(fen, source["player"], tactic)
-                            return {
-                                "fen": fen,
-                                "moves": next_moves,
-                                "player": source["player"],
-                                "opponent": opponent,
-                                "event": event,
-                                "year": year,
-                                "tactic": tactic,
-                                "rating": 2800,
-                                "themes": ["tactics", "live_game"],
-                                "source": "lichess_live"
-                            }
+                games = await _fetch_recent_games(client, source)
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Could not fetch games for {label}: HTTP {e.response.status_code}")
+                if e.response.status_code == 429 and not backed_off:
+                    # Both sites ask clients to wait a minute after a 429
+                    backed_off = True
+                    await asyncio.sleep(60)
+                continue
             except Exception as e:
-                logger.warning(f"Error fetching from lichess: {e}")
+                logger.warning(f"Could not fetch games for {label}: {e}")
+                continue
+
+            random.shuffle(games)
+            for g in games:
+                finish = _extract_finish(g["pgn"], source)
+                if not finish or not is_unique(finish["fen"]):
+                    continue
+                tactic = "Checkmate sequence"
+                mark_used(finish["fen"], source["player"], tactic)
+                return {
+                    "fen": finish["fen"],
+                    "moves": finish["moves"],
+                    "player": source["player"],
+                    "opponent": finish["opponent"],
+                    "event": g["event"] or finish["event"],
+                    "year": finish["year"],
+                    "tactic": tactic,
+                    "rating": 2800,
+                    "themes": ["tactics", "live_game"],
+                    "source": source["site"],
+                }
+            logger.info(f"No new checkmate finishes in {len(games)} recent games of {label}")
                 
     # Fallback if loop fails
+    if not allow_fallback:
+        raise RuntimeError("Could not fetch a unique checkmate game from Lichess or chess.com.")
     game = random.choice(FAMOUS_POSITIONS)
     return {
         "fen": game["fen"],

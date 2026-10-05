@@ -50,7 +50,7 @@ def get_text_font(size=20):
         return ImageFont.load_default()
 
 def load_all_fonts():
-    sizes = [18, 20, 30, 34, 35, 36, 40, 44, 48, 50, 52, 56, 80, 110]
+    sizes = [18, 20, 28, 30, 34, 35, 36, 40, 44, 48, 50, 52, 56, 80, 110]
     return {sz: get_text_font(sz) for sz in sizes}
 
 def get_text_width(draw, text, font):
