@@ -1,12 +1,10 @@
 import os
 import json
-import logging
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 
-# Scopes required for uploading YouTube videos
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+from pipeline.upload import SCOPES
+
+SECRET_FILES = ["client_secret.json", "credentials.json"]
 
 def main():
     print("=== YouTube OAuth Refresh Token Generator ===")
@@ -17,43 +15,32 @@ def main():
     print("   (Choose 'Desktop App' as the application type).")
     print("5. Download the JSON file and save it in this folder as 'client_secret.json'.")
     print("==============================================\n")
-    
-    if not os.path.exists("client_secret.json"):
-        print("ERROR: client_secret.json not found in the current directory.")
+
+    secrets_path = next((p for p in SECRET_FILES if os.path.exists(p)), None)
+    if not secrets_path:
+        print(f"ERROR: none of {', '.join(SECRET_FILES)} found in the current directory.")
         return
 
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            print("Refreshing existing token...")
-            creds.refresh(Request())
-        else:
-            print("Starting new OAuth flow...")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'client_secret.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-            
-        with open('token.json', 'w') as token_file:
-            token_file.write(creds.to_json())
-            
-    print("\nSUCCESS! Your token.json has been generated.")
-    print("Please set the following environment variables in your .env file:\n")
-    
-    with open('client_secret.json', 'r') as f:
+    # Always run a fresh consent: offline + consent guarantees Google returns a
+    # refresh token, and it is minted with every scope the app uses.
+    print("Starting OAuth flow in your browser...")
+    flow = InstalledAppFlow.from_client_secrets_file(secrets_path, SCOPES)
+    creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+
+    with open('token.json', 'w') as token_file:
+        token_file.write(creds.to_json())
+
+    with open(secrets_path, 'r') as f:
         client_data = json.load(f)
-        client_id = client_data.get("installed", {}).get("client_id", "")
-        client_secret = client_data.get("installed", {}).get("client_secret", "")
-        
-    with open('token.json', 'r') as f:
-        token_data = json.load(f)
-        refresh_token = token_data.get("refresh_token", "")
-        
-    print(f"YOUTUBE_CLIENT_ID={client_id}")
-    print(f"YOUTUBE_CLIENT_SECRET={client_secret}")
-    print(f"YOUTUBE_REFRESH_TOKEN={refresh_token}")
+    client_info = client_data.get("installed") or client_data.get("web") or {}
+
+    print("\nSUCCESS! Your token.json has been generated.")
+    print("Set these in your .env file (local/VM) or as GitHub Actions secrets:\n")
+    print(f"YOUTUBE_CLIENT_ID={client_info.get('client_id', '')}")
+    print(f"YOUTUBE_CLIENT_SECRET={client_info.get('client_secret', '')}")
+    print(f"YOUTUBE_REFRESH_TOKEN={creds.refresh_token}")
+    print("\nNOTE: if your OAuth consent screen is still in 'Testing', Google expires this")
+    print("refresh token after 7 days. Set it to 'In production' for unattended uploads.")
 
 if __name__ == '__main__':
     main()

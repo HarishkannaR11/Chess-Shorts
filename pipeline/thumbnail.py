@@ -5,6 +5,7 @@ import chess
 import chess.svg
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
+from pipeline.board import get_text_font
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +44,10 @@ def generate_thumbnail(fen: str, player: str, opponent: str, event: str, year: s
         b = int(c1[2] + (c2[2] - c1[2]) * y / thumb_h)
         draw.line([(0, y), (thumb_w, y)], fill=(r, g, b))
         
-    try:
-        font_large = ImageFont.truetype("arialbd.ttf", 72)
-        font_medium = ImageFont.truetype("arialbd.ttf", 52)
-        font_small = ImageFont.truetype("arialbd.ttf", 40)
-    except IOError:
-        logger.warning("Arial font not found, falling back to default.")
-        font_large = ImageFont.load_default()
-        font_medium = ImageFont.load_default()
-        font_small = ImageFont.load_default()
+    # Bundled Inter-Bold, with OS fallbacks (Arial isn't available on Linux servers)
+    font_large = get_text_font(72)
+    font_medium = get_text_font(52)
+    font_small = get_text_font(40)
         
     # Draw Player Names at the very top
     vs_text = f"{player} vs {opponent}"
@@ -128,12 +124,9 @@ def generate_series_thumbnail(fen: str, number: int, rating: int, output_path: s
     border_width = 8
     draw.rectangle([0, 0, thumb_w, thumb_h], outline="#9C27B0", width=border_width)
     
-    try:
-        font_huge = ImageFont.truetype("arialbd.ttf", 160)
-        font_large = ImageFont.truetype("arialbd.ttf", 90)
-        font_medium = ImageFont.truetype("arialbd.ttf", 60)
-    except:
-        font_huge = font_large = font_medium = ImageFont.load_default()
+    font_huge = get_text_font(160)
+    font_large = get_text_font(90)
+    font_medium = get_text_font(60)
         
     # Big Number
     num_text = f"#{number}"

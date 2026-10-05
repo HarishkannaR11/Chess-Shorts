@@ -40,6 +40,8 @@ async def init_db():
             await db.execute("ALTER TABLE videos ADD COLUMN views INTEGER DEFAULT 0")
         if 'viewed_percentage' not in columns:
             await db.execute("ALTER TABLE videos ADD COLUMN viewed_percentage REAL DEFAULT 0.0")
+        if 'uploaded_at' not in columns:
+            await db.execute("ALTER TABLE videos ADD COLUMN uploaded_at TIMESTAMP")
             
         await db.execute('''
             CREATE TABLE IF NOT EXISTS used_content (
@@ -120,9 +122,10 @@ async def update_video_status(video_id: int, status: str, youtube_url: str = Non
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
             UPDATE videos 
-            SET status = ?, youtube_url = ?, video_id = ?
+            SET status = ?, youtube_url = ?, video_id = ?,
+                uploaded_at = CASE WHEN ? = 'uploaded' THEN CURRENT_TIMESTAMP ELSE uploaded_at END
             WHERE id = ?
-        ''', (status, youtube_url, yt_video_id, video_id))
+        ''', (status, youtube_url, yt_video_id, status, video_id))
         await db.commit()
 
 async def get_stats() -> dict:

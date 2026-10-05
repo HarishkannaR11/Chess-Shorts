@@ -28,11 +28,10 @@ from pipeline.board import generate_frames
 from pipeline.video import combine_video
 from pipeline.thumbnail import generate_thumbnail
 from pipeline.upload import upload_to_youtube
-from pipeline.setup import setup_assets
-from pipeline.assets_setup import setup_music, download_sounds
 from pipeline.series import generate_series
+from pipeline.daily import prepare_environment, publish_daily
 from database.db import (
-    init_db, save_video, get_all_videos, update_video_status, 
+    save_video, get_all_videos, update_video_status, 
     get_stats, delete_video, get_all_series, get_series_stats, save_series_puzzle
 )
 
@@ -45,26 +44,8 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    await init_db()
-    
-    # Preload local puzzles if missing
-    import sqlite3
-    try:
-        conn = sqlite3.connect('database/chess_shorts.db')
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM local_puzzles")
-        if c.fetchone()[0] == 0:
-            import subprocess
-            logger.info("Initializing local puzzle dataset (one-time). This may take a minute...")
-            subprocess.run(["python", "download_puzzles.py"])
-        conn.close()
-    except Exception as e:
-        logger.error(f"Failed to init local puzzles: {e}")
-        
-    await setup_assets()
-    await download_sounds()
-    await setup_music()
+    # Startup: DB schema, offline puzzle cache, assets
+    await prepare_environment()
     
     # Load schedule
     sched_path = os.path.join("config", "schedule.json")
@@ -86,7 +67,9 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(title="Chess Shorts API", lifespan=lifespan)
-app.mount("/files", StaticFiles(directory="."), name="files")
+# Only expose generated media (never the project root, which holds .env and tokens)
+os.makedirs("outputs", exist_ok=True)
+app.mount("/files/outputs", StaticFiles(directory="outputs"), name="files")
 
 class PuzzleModel(BaseModel):
     fen: str
@@ -119,6 +102,7 @@ class UploadRequest(BaseModel):
 class ScheduleRequest(BaseModel):
     time: str
     enabled: bool = True
+    auto_upload: bool | None = None  # None keeps the current setting
 
 @app.get("/puzzle")
 async def get_puzzle():
@@ -430,106 +414,18 @@ async def run_master_pipeline():
         logger.error(f"Error in master pipeline: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-def is_youtube_quota_exhausted() -> bool:
-    """Check if the YouTube Data API quota is exhausted using a cheap 1-unit call."""
-    try:
-        from pipeline.upload import get_authenticated_service
-        youtube = get_authenticated_service()
-        youtube.channels().list(part="id", mine=True).execute()
-        return False
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "quotaexceeded" in err_msg or "quota exceeded" in err_msg:
-            logger.warning(f"YouTube quota is exhausted: {e}")
-            return True
-        logger.error(f"Error checking YouTube quota: {e}")
-        return False
-
-async def get_next_format() -> str:
-    """Query the last used format from the database to rotate formats (flash -> story -> series)."""
-    try:
-        import aiosqlite
-        from database.db import DB_PATH
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("SELECT format FROM used_content ORDER BY created_at DESC LIMIT 1")
-            row = await cursor.fetchone()
-            if not row:
-                return "flash"
-            last_format = row[0]
-            if last_format == "flash":
-                return "story"
-            elif last_format == "story":
-                return "series"
-            else:
-                return "flash"
-    except Exception as e:
-        logger.warning(f"Error getting next format from database: {e}. Defaulting to flash.")
-        return "flash"
-
 async def run_scheduled_cycle():
-    """Scheduled job that runs daily: checks quota, rotates formats, generates, and saves as pending."""
+    """Daily job: generate the next format in the rotation and publish it (see pipeline/daily.py)."""
     logger.info("Starting scheduled video generation cycle...")
-    if is_youtube_quota_exhausted():
-        logger.warning("YouTube quota is exhausted for today. Skipping scheduled run gracefully.")
-        return
-        
-    fmt = await get_next_format()
-    logger.info(f"Scheduled Run - Selected format: {fmt}")
-    
+    auto_upload = True
     try:
-        if fmt == "flash":
-            from pipeline.flash import generate_flash
-            logger.info("Executing Flash video generator...")
-            result = await generate_flash()
-            db_id = await save_video({
-                "title": result["title"],
-                "description": "Can you find the winning move? #chess #tactics #puzzle #shorts",
-                "thumbnail_path": result["thumbnail_path"],
-                "video_path": result["video_path"],
-                "script_json": json.dumps({"hook": result["hook"], "tags": "chess, tactics, shorts"}),
-                "format": "flash",
-                "hook": result["hook"]
-            })
-            
-        elif fmt == "story":
-            from pipeline.story import generate_story
-            logger.info("Executing Story video generator...")
-            result = await generate_story()
-            db_id = await save_video({
-                "title": result["title"],
-                "description": result["script"].get("description", "") + "\n\n#shorts #chess #story",
-                "thumbnail_path": result["thumbnail_path"],
-                "video_path": result["video_path"],
-                "script_json": json.dumps(result["script"]),
-                "format": "story",
-                "hook": result["script"].get("hook", "")
-            })
-            
-        else: # series
-            from pipeline.series import generate_series
-            logger.info("Executing Series video generator...")
-            result = await generate_series("outputs")
-            series_db_id = await save_series_puzzle({
-                'puzzle_number': result['puzzle_number'],
-                'fen': "",
-                'moves': "",
-                'rating': result['rating'],
-                'theme': result['script']['theme'],
-                'video_path': result['video_path'],
-                'thumbnail_path': result['thumbnail_path']
-            })
-            db_id = await save_video({
-                "title": result["title"],
-                "description": f"Can you solve puzzle #{result['puzzle_number']}? #shorts #chess #series",
-                "thumbnail_path": result["thumbnail_path"],
-                "video_path": result["video_path"],
-                "script_json": json.dumps(result["script"]),
-                "format": "series",
-                "hook": result["title"]
-            })
-            
-        logger.info(f"Video generated successfully and saved to DB with ID: {db_id} as pending.")
-            
+        with open(os.path.join("config", "schedule.json"), "r") as f:
+            auto_upload = json.load(f).get("auto_upload", True)
+    except Exception:
+        pass
+    try:
+        summary = await publish_daily(upload=auto_upload, privacy=os.environ.get("YOUTUBE_PRIVACY") or "public")
+        logger.info(f"Scheduled cycle finished: {summary}")
     except Exception as e:
         logger.error(f"Scheduled video generation cycle failed: {e}", exc_info=True)
 
@@ -664,7 +560,14 @@ async def update_schedule(req: ScheduleRequest):
         os.makedirs("config", exist_ok=True)
         sched_path = os.path.join("config", "schedule.json")
         
-        data = {"time": req.time, "enabled": req.enabled}
+        auto_upload = req.auto_upload
+        if auto_upload is None:
+            try:
+                with open(sched_path, "r") as f:
+                    auto_upload = json.load(f).get("auto_upload", True)
+            except Exception:
+                auto_upload = True
+        data = {"time": req.time, "enabled": req.enabled, "auto_upload": auto_upload}
         with open(sched_path, "w") as f:
             json.dump(data, f, indent=4)
             

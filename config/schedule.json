@@ -1,4 +1,5 @@
 {
     "time": "09:00",
-    "enabled": false
+    "enabled": false,
+    "auto_upload": true
 }

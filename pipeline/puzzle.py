@@ -200,7 +200,7 @@ LICHESS_ENDPOINTS = [
     {"player": "Alireza Firouzja", "url": "https://lichess.org/api/games/user/AlirezaFirouzja?max=50&rated=true"}
 ]
 
-async def fetch_champion_game(target_player: str = None) -> Dict[str, Any]:
+async def fetch_champion_game(target_player: str = None, allow_fallback: bool = True) -> Dict[str, Any]:
     """
     Fetch a real champion game either from Lichess or hardcoded famous positions.
     Guarantees uniqueness through pipeline.uniqueness module.
@@ -302,6 +302,8 @@ async def fetch_champion_game(target_player: str = None) -> Dict[str, Any]:
                 logger.warning(f"Error fetching from lichess: {e}")
                 
     # Fallback if loop fails
+    if not allow_fallback:
+        raise RuntimeError("Could not fetch a unique checkmate game from Lichess.")
     game = random.choice(FAMOUS_POSITIONS)
     return {
         "fen": game["fen"],

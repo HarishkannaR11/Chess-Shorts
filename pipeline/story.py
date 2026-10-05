@@ -12,7 +12,7 @@ from database.db import mark_content_used
 
 logger = logging.getLogger(__name__)
 
-async def generate_story(output_base_dir="outputs"):
+async def generate_story(output_base_dir="outputs", allow_fallback=True):
     """MASTER ENDPOINT logic: runs full story pipeline in order."""
     logger.info("Starting Story generation...")
     timestamp = int(time.time())
@@ -30,7 +30,7 @@ async def generate_story(output_base_dir="outputs"):
         next_idx = (rotation.index(last_champ) + 1) % len(rotation)
         target_champ = rotation[next_idx]
         
-    puzzle_data = await fetch_champion_game(target_player=target_champ)
+    puzzle_data = await fetch_champion_game(target_player=target_champ, allow_fallback=allow_fallback)
     
     # 2. Generate script
     script_data = generate_script(puzzle_data)

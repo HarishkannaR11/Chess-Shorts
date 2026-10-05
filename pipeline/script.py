@@ -9,7 +9,15 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_client = None
+
+def _get_client() -> Groq:
+    # Created lazily so that importing this module (e.g. to run the Flash or
+    # Series formats) doesn't require GROQ_API_KEY to be set.
+    global _client
+    if _client is None:
+        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _client
 
 def generate_script(puzzle: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -58,7 +66,7 @@ Game Context:
 """
     
     try:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}

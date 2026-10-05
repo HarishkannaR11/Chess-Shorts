@@ -1,0 +1,73 @@
+name: Smoke test
+
+# Renders Flash and Series Shorts without uploading, and checks the Story
+# format's data sources, so pipeline breakage shows up before the daily job.
+# The rendered videos are attached to the run.
+on:
+  push:
+    paths:
+      - "pipeline/**"
+      - "database/**"
+      - "publish.py"
+      - "download_puzzles.py"
+      - "requirements.txt"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "pipeline/**"
+      - "database/**"
+      - "publish.py"
+      - "download_puzzles.py"
+      - "requirements.txt"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Render Flash and Series (no upload)
+        run: |
+          python publish.py --no-upload --format flash
+          python publish.py --no-upload --format series
+
+      - name: Check Story sources (Lichess games + text-to-speech)
+        run: |
+          python - <<'EOF'
+          import asyncio
+          from pipeline.puzzle import fetch_champion_game
+          from pipeline.voice import generate_voice
+
+          async def main():
+              game = await fetch_champion_game(allow_fallback=False)
+              print(f"Lichess game OK: {game['player']} vs {game['opponent']} ({len(game['moves'])} plies)")
+              path, words = await generate_voice("Smoke test. The knight jumps in for checkmate.")
+              assert words, "TTS returned no word timings"
+              print(f"TTS OK: {path}, {len(words)} words")
+
+          asyncio.run(main())
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-videos
+          path: outputs/*/final.mp4
+          if-no-files-found: ignore
+          retention-days: 7
