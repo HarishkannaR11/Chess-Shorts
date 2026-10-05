@@ -5,7 +5,7 @@ requests
 python-dotenv
 pydantic
 groq
-edge-tts
+edge-tts>=7.0
 python-chess
 pymupdf
 Pillow
