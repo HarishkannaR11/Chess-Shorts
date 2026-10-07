@@ -75,6 +75,15 @@ def get_authenticated_service():
             ) from e
         return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
+    if os.environ.get("GITHUB_ACTIONS"):
+        # A CI runner has no token files or browser: the secrets are the only way in
+        missing = [n for n, v in (("YOUTUBE_CLIENT_ID", client_id), ("YOUTUBE_CLIENT_SECRET", client_secret),
+                                  ("YOUTUBE_REFRESH_TOKEN", refresh_token)) if not v]
+        raise RuntimeError(
+            f"Missing GitHub secret(s): {', '.join(missing)}. Add them in the repo under Settings > "
+            "Secrets and variables > Actions (values come from `python youtube_auth.py`)."
+        )
+
     # Fallback to local files
     logger.info("Environment credentials not found or invalid. Falling back to local files.")
     token_path = os.path.join("outputs", "token.json")
